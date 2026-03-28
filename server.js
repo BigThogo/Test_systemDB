@@ -9,7 +9,7 @@ app.use(express.json());
 // ✅ 1. Configuration - ตรวจสอบ user/password/connectString ให้ตรงกับเครื่องคุณ
 const DB_CONFIG = {
   user: 'SYSTEM',
-  password: 'your_password', 
+  password: 'bigThogo_455', 
   connectString: 'localhost:1521/xe', // หรือ 'localhost:1521/XEPDB1'
 };
 
