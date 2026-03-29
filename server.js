@@ -1,35 +1,31 @@
 const express = require('express');
 const oracledb = require('oracledb');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname)));
 
-// ✅ 1. Configuration - ตรวจสอบ user/password/connectString ให้ตรงกับเครื่องคุณ
 const DB_CONFIG = {
   user: 'SYSTEM',
-  password: 'bigThogo_455', 
-  connectString: 'localhost:1521/xe', // หรือ 'localhost:1521/XEPDB1'
+  password: 'bigThogo_455',
+  connectString: 'localhost:1521/xe',
 };
 
-// Initialize Connection Pool
+// ── Connection Pool ──────────────────────────────────────────
 async function initPool() {
   try {
-    await oracledb.createPool({
-      ...DB_CONFIG,
-      poolMin: 2,
-      poolMax: 10,
-    });
-    console.log('✅ เชื่อมต่อ Oracle Database สำเร็จ (Schema: SYSTEM)');
+    await oracledb.createPool({ ...DB_CONFIG, poolMin: 2, poolMax: 10 });
+    console.log('✅ Oracle Database connected');
   } catch (err) {
-    console.error('❌ เชื่อมต่อ Oracle ไม่ได้:', err);
+    console.error('❌ Oracle connection failed:', err.message);
     process.exit(1);
   }
 }
 
-// Helper Function สำหรับรัน SQL
-async function query(sql, binds = [], opts = {}) {
+async function query(sql, binds = {}, opts = {}) {
   let conn;
   try {
     conn = await oracledb.getConnection();
@@ -44,81 +40,317 @@ async function query(sql, binds = [], opts = {}) {
   }
 }
 
-// ============================================================
-//  API: EMPLOYEES (ดึงข้อมูลพนักงาน)
-// ============================================================
-app.get('/api/employees', async (req, res) => {
+// ── HEALTH CHECK ─────────────────────────────────────────────
+app.get('/api/health', async (req, res) => {
   try {
-    const { search } = req.query;
-    let sql = `
-      SELECT e.EMPLOYEE_ID, e.FIRST_NAME, e.LAST_NAME, 
-             d.DEPARTMENT_NAME, p.POSITION_NAME, 
-             e.STATUS, e.PHONE
-      FROM SYSTEM.EMPLOYEE e
-      LEFT JOIN SYSTEM.DEPARTMENT d ON e.DEPARTMENT_ID = d.DEPARTMENT_ID
-      LEFT JOIN SYSTEM.POSITION p   ON e.POSITION_ID   = p.POSITION_ID
-      WHERE 1=1
-    `;
-    const binds = [];
-    if (search) {
-      sql += ` AND (UPPER(e.FIRST_NAME) LIKE UPPER(:search) OR UPPER(e.LAST_NAME) LIKE UPPER(:search))`;
-      binds.push(`%${search}%`);
-    }
-    sql += ` ORDER BY e.EMPLOYEE_ID`;
-    
-    const result = await query(sql, binds);
+    await query('SELECT 1 FROM DUAL');
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// ── DASHBOARD STATS ──────────────────────────────────────────
+app.get('/api/stats', async (req, res) => {
+  try {
+    const [empStats, deptCount, nightCount, attCount] = await Promise.all([
+      query(`SELECT COUNT(*) AS TOTAL, SUM(CASE WHEN STATUS='Active' THEN 1 ELSE 0 END) AS ACTIVE FROM SYSTEM.EMPLOYEE`),
+      query(`SELECT COUNT(*) AS CNT FROM SYSTEM.DEPARTMENT`),
+      query(`SELECT COUNT(*) AS CNT FROM SYSTEM.ATTENDANCE WHERE IS_NIGHT = 1`),
+      query(`SELECT COUNT(*) AS CNT FROM SYSTEM.ATTENDANCE`),
+    ]);
+    res.json({
+      totalEmployees: empStats.rows[0].TOTAL,
+      activeEmployees: empStats.rows[0].ACTIVE,
+      departments: deptCount.rows[0].CNT,
+      nightShiftRecords: nightCount.rows[0].CNT,
+      attendanceRecords: attCount.rows[0].CNT,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── DEPARTMENTS ───────────────────────────────────────────────
+app.get('/api/departments', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT d.DEPARTMENT_ID, d.DEPARTMENT_NAME, d.LOCATION, d.INTERNAL_PHONE,
+             e.FIRST_NAME || ' ' || e.LAST_NAME AS MANAGER_NAME,
+             COUNT(emp.EMPLOYEE_ID) AS EMPLOYEE_COUNT
+      FROM SYSTEM.DEPARTMENT d
+      LEFT JOIN SYSTEM.EMPLOYEE e   ON d.MANAGER_ID    = e.EMPLOYEE_ID
+      LEFT JOIN SYSTEM.EMPLOYEE emp ON emp.DEPARTMENT_ID = d.DEPARTMENT_ID
+      GROUP BY d.DEPARTMENT_ID, d.DEPARTMENT_NAME, d.LOCATION, d.INTERNAL_PHONE,
+               e.FIRST_NAME, e.LAST_NAME
+      ORDER BY d.DEPARTMENT_ID
+    `);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================================
-//  API: ATTENDANCE (บันทึกเวลาทำงาน)
-// ============================================================
+// ── POSITIONS ────────────────────────────────────────────────
+app.get('/api/positions', async (req, res) => {
+  try {
+    const result = await query(`SELECT * FROM SYSTEM.POSITION ORDER BY POSITION_ID`);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── SHIFTS ───────────────────────────────────────────────────
+app.get('/api/shifts', async (req, res) => {
+  try {
+    const result = await query(`SELECT * FROM SYSTEM.SHIFT ORDER BY SHIFT_ID`);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── EMPLOYEES ────────────────────────────────────────────────
+// NOTE: EMPLOYEE.POSITION_ID is NUMBER (1-5) but POSITION.POSITION_ID is VARCHAR2 (P01-P05)
+// Bridge: 'P' || LPAD(TO_CHAR(e.POSITION_ID), 2, '0')
+
+app.get('/api/employees', async (req, res) => {
+  try {
+    const { search, dept } = req.query;
+    const binds = {};
+    let where = 'WHERE 1=1';
+
+    if (search) {
+      where += ` AND (UPPER(e.FIRST_NAME) LIKE UPPER(:search) OR UPPER(e.LAST_NAME) LIKE UPPER(:search) OR TO_CHAR(e.EMPLOYEE_ID) LIKE :search2)`;
+      binds.search  = `%${search}%`;
+      binds.search2 = `%${search}%`;
+    }
+    if (dept && dept !== 'ALL') {
+      where += ` AND d.DEPARTMENT_NAME = :dept`;
+      binds.dept = dept;
+    }
+
+    const result = await query(`
+      SELECT e.EMPLOYEE_ID, e.FIRST_NAME, e.LAST_NAME,
+             e.GENDER, e.PHONE, e.EMAIL,
+             TO_CHAR(e.HIRE_DATE, 'YYYY-MM-DD') AS HIRE_DATE,
+             e.STATUS, e.DEPARTMENT_ID, e.POSITION_ID,
+             d.DEPARTMENT_NAME,
+             p.POSITION_NAME, p.MIN_SALARY, p.MAX_SALARY, p.SHIFT_TYPE
+      FROM SYSTEM.EMPLOYEE e
+      LEFT JOIN SYSTEM.DEPARTMENT d ON e.DEPARTMENT_ID = d.DEPARTMENT_ID
+      LEFT JOIN SYSTEM.POSITION   p ON p.POSITION_ID = 'P' || LPAD(TO_CHAR(e.POSITION_ID), 2, '0')
+      ${where}
+      ORDER BY e.EMPLOYEE_ID
+    `, binds);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/employees/:id', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT e.*, d.DEPARTMENT_NAME, p.POSITION_NAME, p.MIN_SALARY, p.MAX_SALARY
+      FROM SYSTEM.EMPLOYEE e
+      LEFT JOIN SYSTEM.DEPARTMENT d ON e.DEPARTMENT_ID = d.DEPARTMENT_ID
+      LEFT JOIN SYSTEM.POSITION   p ON p.POSITION_ID = 'P' || LPAD(TO_CHAR(e.POSITION_ID), 2, '0')
+      WHERE e.EMPLOYEE_ID = :id
+    `, { id: parseInt(req.params.id) });
+    if (!result.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/employees', async (req, res) => {
+  try {
+    const { firstName, lastName, birthDate, gender, phone, email, hireDate, status, departmentId, positionId } = req.body;
+    const idResult = await query(`SELECT NVL(MAX(EMPLOYEE_ID), 100) + 1 AS NEXT_ID FROM SYSTEM.EMPLOYEE`);
+    const newId = idResult.rows[0].NEXT_ID;
+
+    await query(`
+      INSERT INTO SYSTEM.EMPLOYEE
+        (EMPLOYEE_ID, FIRST_NAME, LAST_NAME, BIRTH_DATE, GENDER, PHONE, EMAIL, HIRE_DATE, STATUS, DEPARTMENT_ID, POSITION_ID)
+      VALUES (:id, :fn, :ln,
+        ${birthDate ? "TO_DATE(:bd, 'YYYY-MM-DD')" : 'NULL'},
+        :gender, :phone, :email,
+        TO_DATE(:hd, 'YYYY-MM-DD'),
+        :status, :deptId, :posId)
+    `, {
+      id: newId, fn: firstName, ln: lastName,
+      ...(birthDate ? { bd: birthDate } : {}),
+      gender: gender || 'Male',
+      phone: phone || null, email: email || null,
+      hd: hireDate, status: status || 'Active',
+      deptId: parseInt(departmentId), posId: parseInt(positionId)
+    });
+    res.status(201).json({ message: 'Employee added', id: newId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/employees/:id', async (req, res) => {
+  try {
+    const { firstName, lastName, phone, email, status, departmentId, positionId } = req.body;
+    await query(`
+      UPDATE SYSTEM.EMPLOYEE
+      SET FIRST_NAME = :fn, LAST_NAME = :ln,
+          PHONE = :phone, EMAIL = :email, STATUS = :status,
+          DEPARTMENT_ID = :deptId, POSITION_ID = :posId
+      WHERE EMPLOYEE_ID = :id
+    `, {
+      fn: firstName, ln: lastName,
+      phone: phone || null, email: email || null,
+      status, deptId: parseInt(departmentId), posId: parseInt(positionId),
+      id: parseInt(req.params.id)
+    });
+    res.json({ message: 'Updated' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/employees/:id', async (req, res) => {
+  try {
+    await query(`DELETE FROM SYSTEM.EMPLOYEE WHERE EMPLOYEE_ID = :id`, { id: parseInt(req.params.id) });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── ATTENDANCE ───────────────────────────────────────────────
+// NOTE: ATTENDANCE.SHIFT_ID stores '1','2','3' but SHIFT table uses 'S01','S02','S03'
+// Bridge: 'S' || LPAD(a.SHIFT_ID, 2, '0') for the JOIN
+
+app.get('/api/attendance', async (req, res) => {
+  try {
+    const { search } = req.query;
+    const binds = {};
+    let where = 'WHERE 1=1';
+    if (search) {
+      where += ` AND (UPPER(e.FIRST_NAME) LIKE UPPER(:search) OR UPPER(e.LAST_NAME) LIKE UPPER(:search))`;
+      binds.search = `%${search}%`;
+    }
+    const result = await query(`
+      SELECT a.ATTENDANCE_ID, a.EMPLOYEE_ID, a.SHIFT_ID,
+             e.FIRST_NAME || ' ' || e.LAST_NAME AS EMP_NAME,
+             d.DEPARTMENT_NAME,
+             s.SHIFT_NAME, s.IS_NIGHT AS SHIFT_IS_NIGHT,
+             TO_CHAR(a.WORK_DATE, 'YYYY-MM-DD')  AS WORK_DATE,
+             TO_CHAR(a.CLOCK_IN,  'HH24:MI')      AS CLOCK_IN,
+             TO_CHAR(a.CLOCK_OUT, 'HH24:MI')      AS CLOCK_OUT,
+             a.WORK_HOURS, a.OT_HOURS, a.IS_NIGHT
+      FROM SYSTEM.ATTENDANCE a
+      JOIN  SYSTEM.EMPLOYEE   e ON a.EMPLOYEE_ID = e.EMPLOYEE_ID
+      JOIN  SYSTEM.DEPARTMENT d ON e.DEPARTMENT_ID = d.DEPARTMENT_ID
+      LEFT JOIN SYSTEM.SHIFT  s ON s.SHIFT_ID = 'S' || LPAD(a.SHIFT_ID, 2, '0')
+      ${where}
+      ORDER BY a.WORK_DATE DESC, a.ATTENDANCE_ID DESC
+    `, binds);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/attendance', async (req, res) => {
   try {
     const { empId, shiftId, workDate, clockIn, clockOut, workHours, otHours, isNight } = req.body;
-    
-    // สร้าง ID (เนื่องจาก ATTENDANCE_ID ใน DDL เป็น VARCHAR2)
-    const attId = Date.now().toString().substring(0, 20);
+    const idResult = await query(`
+      SELECT NVL(MAX(CASE WHEN REGEXP_LIKE(ATTENDANCE_ID,'^[0-9]+$') THEN TO_NUMBER(ATTENDANCE_ID) ELSE 0 END), 0) + 1 AS NEXT_ID
+      FROM SYSTEM.ATTENDANCE
+    `);
+    const newId = String(idResult.rows[0].NEXT_ID);
 
-    const sql = `
-      INSERT INTO SYSTEM.ATTENDANCE 
+    await query(`
+      INSERT INTO SYSTEM.ATTENDANCE
         (ATTENDANCE_ID, EMPLOYEE_ID, SHIFT_ID, WORK_DATE, CLOCK_IN, CLOCK_OUT, WORK_HOURS, OT_HOURS, IS_NIGHT)
-      VALUES (:1, :2, :3, TO_DATE(:4, 'YYYY-MM-DD'), 
-              TO_TIMESTAMP(:5, 'YYYY-MM-DD HH24:MI:SS'), 
-              TO_TIMESTAMP(:6, 'YYYY-MM-DD HH24:MI:SS'), 
-              :7, :8, :9)
-    `;
-
-    await query(sql, [
-      attId, empId, shiftId, workDate, 
-      `${workDate} ${clockIn}`, `${workDate} ${clockOut}`, 
-      workHours || 8, otHours || 0, isNight || 0
-    ]);
-
-    res.status(201).json({ message: 'บันทึกเวลาเรียบร้อย', id: attId });
+      VALUES (:attId, :empId, :shiftId,
+        TO_DATE(:workDate, 'YYYY-MM-DD'),
+        TO_TIMESTAMP(:workDate || ' ' || :clockIn,  'YYYY-MM-DD HH24:MI'),
+        TO_TIMESTAMP(:workDate || ' ' || :clockOut, 'YYYY-MM-DD HH24:MI'),
+        :workHours, :otHours, :isNight)
+    `, {
+      attId: newId, empId: parseInt(empId), shiftId,
+      workDate, clockIn, clockOut,
+      workHours: workHours || 8, otHours: otHours || 0, isNight: isNight || 0
+    });
+    res.status(201).json({ message: 'Recorded', id: newId });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ============================================================
-//  API: SALARY (ดึงข้อมูลเงินเดือน)
-// ============================================================
+app.delete('/api/attendance/:id', async (req, res) => {
+  try {
+    await query(`DELETE FROM SYSTEM.ATTENDANCE WHERE ATTENDANCE_ID = :id`, { id: req.params.id });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── SALARY ───────────────────────────────────────────────────
 app.get('/api/salary', async (req, res) => {
   try {
-    const result = await query(`SELECT * FROM SYSTEM.SALARY ORDER BY SALARY_YEAR DESC, SALARY_MONTH DESC`);
+    const { month, year } = req.query;
+    const binds = {};
+    let where = 'WHERE 1=1';
+    if (month) { where += ' AND s.SALARY_MONTH = :month'; binds.month = parseInt(month); }
+    if (year)  { where += ' AND s.SALARY_YEAR  = :year';  binds.year  = parseInt(year);  }
+
+    const result = await query(`
+      SELECT s.SALARY_ID, s.EMPLOYEE_ID, s.SALARY_MONTH, s.SALARY_YEAR,
+             s.BASE_SALARY, s.OT_PAY, s.NIGHT_PAY, s.SERVICE_CHARGE,
+             s.DEDUCTION, s.NET_SALARY,
+             TO_CHAR(s.PAYMENT_DATE, 'YYYY-MM-DD') AS PAYMENT_DATE,
+             e.FIRST_NAME || ' ' || e.LAST_NAME AS EMP_NAME,
+             d.DEPARTMENT_NAME
+      FROM SYSTEM.SALARY s
+      JOIN SYSTEM.EMPLOYEE   e ON s.EMPLOYEE_ID   = e.EMPLOYEE_ID
+      JOIN SYSTEM.DEPARTMENT d ON e.DEPARTMENT_ID = d.DEPARTMENT_ID
+      ${where}
+      ORDER BY s.SALARY_YEAR DESC, s.SALARY_MONTH DESC, s.EMPLOYEE_ID
+    `, binds);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Start Server
+app.get('/api/salary/:salaryId/detail', async (req, res) => {
+  try {
+    const [salRow, detailRow] = await Promise.all([
+      query(`
+        SELECT s.*, e.FIRST_NAME || ' ' || e.LAST_NAME AS EMP_NAME,
+               e.EMPLOYEE_ID, d.DEPARTMENT_NAME, p.POSITION_NAME
+        FROM SYSTEM.SALARY s
+        JOIN SYSTEM.EMPLOYEE   e ON s.EMPLOYEE_ID   = e.EMPLOYEE_ID
+        JOIN SYSTEM.DEPARTMENT d ON e.DEPARTMENT_ID = d.DEPARTMENT_ID
+        LEFT JOIN SYSTEM.POSITION p ON p.POSITION_ID = 'P' || LPAD(TO_CHAR(e.POSITION_ID), 2, '0')
+        WHERE s.SALARY_ID = :id
+      `, { id: req.params.salaryId }),
+      query(`SELECT * FROM SYSTEM.SALARYDETAIL WHERE SALARY_ID = :id ORDER BY DETAIL_ID`,
+        { id: req.params.salaryId })
+    ]);
+    if (!salRow.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ salary: salRow.rows[0], details: detailRow.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── START ────────────────────────────────────────────────────
 const PORT = 3000;
 initPool().then(() => {
-  app.listen(PORT, () => console.log(`🚀 API Server รันอยู่ที่ http://localhost:${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`🚀 Server: http://localhost:${PORT}`);
+    console.log(`   App:    http://localhost:${PORT}/index-oracle.html`);
+  });
 });
