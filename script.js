@@ -1,4 +1,4 @@
-const API = 'https://hotel-hrm-api.onrender.com/api';
+const API = 'https://test-systemdb.onrender.com/api';
 
 document.addEventListener('DOMContentLoaded', () => {
   navigate('dashboard');
