@@ -1,4 +1,4 @@
-const API = 'http://localhost:3000/api';
+const API = 'https://hotel-hrm-api.onrender.com/api';
 
 document.addEventListener('DOMContentLoaded', () => {
   navigate('dashboard');

@@ -365,8 +365,10 @@ app.get('/api/salary/:salaryId/detail', async (req, res) => {
 });
 
 // ── START ────────────────────────────────────────────────────
-const PORT = 3000;
+// ✅ เปลี่ยนให้รับ Port จาก Render อัตโนมัติ (ถ้าทดสอบในเครื่องจะใช้ 3000)
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log(`🚀 Server: http://localhost:${PORT}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
   console.log(`   App:    http://localhost:${PORT}/index-oracle.html`);
 });
