@@ -2,6 +2,10 @@ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
+const dns = require('dns'); // ✅ 1. เพิ่มบรรทัดนี้เข้ามา
+
+// ✅ 2. เพิ่มโค้ดบรรทัดนี้ เพื่อบังคับให้ใช้ IPv4 (ข้ามปัญหา ENETUNREACH IPv6)
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 app.use(cors());
@@ -13,7 +17,7 @@ app.use(express.static(path.join(__dirname)));
 // หน้าตาแบบนี้: postgresql://postgres:[PASSWORD]@db.xxxx.supabase.co:5432/postgres
 const pool = new Pool({
   // ⚠️ เปลี่ยน [YOUR-PASSWORD] เป็นรหัสผ่านของคุณ และเปลี่ยน db.xxxxxxxxxxxx... เป็น URL ของคุณ
-  connectionString: 'postgresql://postgres:bigThogo_455@db.pxtwpyqkvxtkmelzrraa.supabase.co:5432/postgres',
+  connectionString: 'postgresql://postgres.pxtwpyqkvxtkmelzrraa:bigThogo_455@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres',
   ssl: { rejectUnauthorized: false } // จำเป็นสำหรับ Supabase
 });
 
