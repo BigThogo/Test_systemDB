@@ -16,9 +16,9 @@ app.use(express.static(path.join(__dirname)));
 // supabase.com → project → Settings → Database → Connection string → URI
 // หน้าตาแบบนี้: postgresql://postgres:[PASSWORD]@db.xxxx.supabase.co:5432/postgres
 const pool = new Pool({
-  // ⚠️ เปลี่ยน [YOUR-PASSWORD] เป็นรหัสผ่านของคุณ และเปลี่ยน db.xxxxxxxxxxxx... เป็น URL ของคุณ
-  connectionString: 'postgresql://postgres.pxtwpyqkvxtkmelzrraa:bigThogo_455@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres',
-  ssl: { rejectUnauthorized: false } // จำเป็นสำหรับ Supabase
+  // ✅ ต้องเป็นพอร์ต 6543 และใช้ลิงก์จากหน้า Transaction Pooler เท่านั้น
+  connectionString: 'postgresql://postgres.pxtwpyqkvxtkmelzrraa:bigThogo_455@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres',
+  ssl: { rejectUnauthorized: false }
 });
 
 async function query(sql, params = []) {
