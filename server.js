@@ -2,8 +2,6 @@ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 const path = require('path');
-<<<<<<< HEAD
-=======
 const dns = require('dns'); // ✅ 1. เพิ่มบรรทัดนี้เข้ามา
 
 // ✅ 2. เพิ่มโค้ดบรรทัดนี้ เพื่อบังคับให้ใช้ IPv4 (ข้ามปัญหา ENETUNREACH IPv6)
